@@ -34,6 +34,7 @@ apt-get install -y \
     "php${PHP_VER}-mbstring" "php${PHP_VER}-xml" "php${PHP_VER}-curl" \
     "php${PHP_VER}-intl" "php${PHP_VER}-zip" \
     certbot python3-certbot-nginx \
+    opendkim opendkim-tools \
     postsrsd \
     wget curl unzip
 
@@ -194,6 +195,11 @@ recipient_canonical_maps = tcp:localhost:10002
 recipient_canonical_classes = envelope_recipient, header_recipient
 
 local_transport = error:local mail delivery is disabled
+
+milter_default_action = accept
+milter_protocol = 6
+smtpd_milters = inet:localhost:8891
+non_smtpd_milters = inet:localhost:8891
 EOF
 
 SRS_SECRET=$(openssl rand -hex 20)
@@ -216,11 +222,39 @@ if getent passwd postsrsd > /dev/null 2>&1; then
     chown postsrsd:postsrsd /etc/postsrsd.secret
 fi
 
+mkdir -p /etc/opendkim/keys/${MAIL_DOMAIN}
+opendkim-genkey -b 2048 -d ${MAIL_DOMAIN} -D /etc/opendkim/keys/${MAIL_DOMAIN} -s mail
+chown -R opendkim:opendkim /etc/opendkim/keys
+
+cat > /etc/opendkim.conf <<DKIMEOF
+Syslog yes
+SyslogSuccess yes
+LogWhy yes
+Canonicalization relaxed/simple
+Mode sv
+OversignHeaders From
+KeyTable /etc/opendkim/KeyTable
+SigningTable refile:/etc/opendkim/SigningTable
+ExternalIgnoreList /etc/opendkim/TrustedHosts
+InternalHosts /etc/opendkim/TrustedHosts
+Socket inet:8891@localhost
+DKIMEOF
+
+echo "mail._domainkey.${MAIL_DOMAIN} ${MAIL_DOMAIN}:mail:/etc/opendkim/keys/${MAIL_DOMAIN}/mail.private" > /etc/opendkim/KeyTable
+echo "*@${MAIL_DOMAIN} mail._domainkey.${MAIL_DOMAIN}" > /etc/opendkim/SigningTable
+printf "127.0.0.1\nlocalhost\n" > /etc/opendkim/TrustedHosts
+
+echo ""
+echo "DKIM public key pentru DNS (adauga ca TXT record):"
+cat /etc/opendkim/keys/${MAIL_DOMAIN}/mail.txt
+echo ""
+
 systemctl enable nginx "php${PHP_VER}-fpm" postfix
 systemctl restart nginx "php${PHP_VER}-fpm"
 
-systemctl enable postsrsd || true
+systemctl enable postsrsd opendkim || true
 systemctl restart postsrsd || echo "postsrsd nu a pornit inca - se va porni dupa SSL"
+systemctl restart opendkim
 
 echo ""
 echo "============================================"
@@ -228,16 +262,19 @@ echo "  Instalare completa!"
 echo "============================================"
 echo ""
 echo "PASUL 1 - DNS (fa asta ACUM daca nu ai facut):"
-echo "  A   mail.cerberustext.com -> 152.53.226.144"
-echo "  MX  cerberustext.com      -> mail.cerberustext.com  (prio 10)"
+echo "  A      ${MAIL_HOSTNAME} -> <IP_SERVER>"
+echo "  MX     ${MAIL_DOMAIN}   -> ${MAIL_HOSTNAME}  (prio 10)"
+echo "  TXT    ${MAIL_DOMAIN}   -> v=spf1 a:${MAIL_HOSTNAME} ~all"
+echo "  TXT    _dmarc.${MAIL_DOMAIN} -> v=DMARC1; p=quarantine; rua=mailto:postmaster@${MAIL_DOMAIN}"
+echo "  TXT    mail._domainkey.${MAIL_DOMAIN} -> (vezi mai sus, cheia DKIM generata)"
 echo ""
 echo "PASUL 2 - SSL (dupa ce DNS propagat):"
-echo "  sudo certbot --nginx -d mail.cerberustext.com"
+echo "  sudo certbot --nginx -d ${MAIL_HOSTNAME}"
 echo ""
-echo "PASUL 3 - Restart postfix dupa SSL:"
-echo "  sudo systemctl restart postfix postsrsd"
+echo "PASUL 3 - Restart servicii dupa SSL:"
+echo "  sudo systemctl restart postfix postsrsd opendkim"
 echo ""
 echo "PASUL 4 - PostfixAdmin setup:"
-echo "  https://mail.cerberustext.com/setup.php"
+echo "  https://${MAIL_HOSTNAME}/setup.php"
 echo ""
 echo "DB_PASS salvat in /root/.mailserver_db_pass"
