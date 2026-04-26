@@ -182,7 +182,7 @@ mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128
 mailbox_size_limit = 0
 recipient_delimiter = +
 inet_interfaces = all
-inet_protocols = all
+inet_protocols = ipv4
 
 virtual_alias_domains = mysql:/etc/postfix/mysql/virtual-domains.cf
 virtual_alias_maps =
@@ -224,7 +224,9 @@ fi
 
 mkdir -p /etc/opendkim/keys/${MAIL_DOMAIN}
 opendkim-genkey -b 2048 -d ${MAIL_DOMAIN} -D /etc/opendkim/keys/${MAIL_DOMAIN} -s mail
-chown -R opendkim:opendkim /etc/opendkim/keys
+chown -R root:root /etc/opendkim/keys
+chmod 750 /etc/opendkim/keys /etc/opendkim/keys/${MAIL_DOMAIN}
+chmod 640 /etc/opendkim/keys/${MAIL_DOMAIN}/mail.private
 
 cat > /etc/opendkim.conf <<DKIMEOF
 Syslog yes

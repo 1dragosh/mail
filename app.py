@@ -84,12 +84,26 @@ def maildir_stats(username):
     return {"received": unread + read, "unread": unread, "sent": sent}
 
 
+def _dkim_value(domain):
+    txt_path = f"/etc/opendkim/keys/{domain}/mail.txt"
+    try:
+        raw = open(txt_path).read()
+        parts = re.findall(r'"([^"]+)"', raw)
+        return "".join(parts)
+    except Exception:
+        return ""
+
+
 def dns_for(domain):
-    return [
+    records = [
         {"type": "MX", "name": "@", "value": MAIL_SERVER, "prio": "10", "ttl": "3600"},
         {"type": "TXT", "name": "@", "value": f"v=spf1 a:{MAIL_SERVER} ~all", "prio": "-", "ttl": "3600"},
         {"type": "TXT", "name": "_dmarc", "value": f"v=DMARC1; p=quarantine; rua=mailto:postmaster@{domain}", "prio": "-", "ttl": "3600"},
     ]
+    dkim = _dkim_value(domain)
+    if dkim:
+        records.append({"type": "TXT", "name": "mail._domainkey", "value": dkim, "prio": "-", "ttl": "3600"})
+    return records
 
 
 def ui_auth(auth):
