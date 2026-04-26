@@ -2,8 +2,10 @@ import os
 import re
 import secrets
 import smtplib
+import time
 import httpx
 import mysql.connector
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -20,6 +22,17 @@ DB_PASS = os.environ["DB_PASS"]
 MASTER_PASS = os.environ["MASTER_PASS"]
 SECRET = os.environ["SECRET"]
 MAIL_BASE = os.environ.get("MAIL_BASE", "/var/mail/vhosts")
+
+_login_attempts = defaultdict(list)
+_pending_keys = {}
+
+
+def check_login_rate(ip):
+    now = time.time()
+    _login_attempts[ip] = [t for t in _login_attempts[ip] if now - t < 300]
+    if len(_login_attempts[ip]) >= 10:
+        raise HTTPException(429, "Too many login attempts. Try again in 5 minutes.")
+    _login_attempts[ip].append(now)
 
 
 def db():
@@ -105,7 +118,9 @@ async def login_get(request: Request, error: int = 0):
 
 
 @app.post("/login")
-async def login_post(password: str = Form(...)):
+async def login_post(request: Request, password: str = Form(...)):
+    ip = request.headers.get("x-real-ip", request.client.host)
+    check_login_rate(ip)
     if password != SECRET:
         return RedirectResponse("/login?error=1", status_code=303)
     r = RedirectResponse("/", status_code=303)
@@ -128,9 +143,13 @@ async def index(
     msg: str = "",
     dns: str = "",
     new_key: str = "",
+    reveal: str = "",
 ):
     if auth != SECRET:
         return RedirectResponse("/login", status_code=303)
+
+    if reveal:
+        new_key = _pending_keys.pop(reveal, "")
 
     conn = db()
     cur = conn.cursor(dictionary=True)
@@ -317,7 +336,9 @@ async def create_api_key(name: str = Form(...), auth: str | None = Cookie(defaul
     conn.commit()
     cur.close()
     conn.close()
-    return RedirectResponse(f"/?tab=apikeys&new_key={key}&msg=API+key+created", status_code=303)
+    token = secrets.token_urlsafe(16)
+    _pending_keys[token] = key
+    return RedirectResponse(f"/?tab=apikeys&reveal={token}&msg=API+key+created", status_code=303)
 
 
 @app.post("/apikeys/delete")
