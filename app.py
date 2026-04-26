@@ -1,3 +1,4 @@
+import imaplib
 import os
 import re
 import secrets
@@ -640,10 +641,22 @@ async def api_send_email(body: SendEmailIn, authorization: str | None = Header(d
         msg["In-Reply-To"] = body.reply_to_id
         msg["References"] = body.reply_to_id
 
+    raw = msg.as_bytes()
+
     try:
         with smtplib.SMTP("127.0.0.1", 25, timeout=10) as smtp:
-            smtp.sendmail(body.from_email, body.to, msg.as_string())
+            smtp.sendmail(body.from_email, body.to, raw)
     except Exception as e:
         raise HTTPException(500, f"SMTP error: {e}")
+
+    try:
+        imap = imaplib.IMAP4("127.0.0.1", 143)
+        imap.login(f"{body.from_email}*admin", MASTER_PASS)
+        imap.select()
+        imap.create("Sent")
+        imap.append("Sent", "\\Seen", None, raw)
+        imap.logout()
+    except Exception:
+        pass
 
     return {"sent": True, "from": body.from_email, "to": body.to, "message_id": msg["Message-ID"]}
