@@ -1,9 +1,13 @@
 import os
 import re
 import secrets
+import smtplib
 import httpx
 import mysql.connector
 from contextlib import asynccontextmanager
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formatdate, make_msgid
 from fastapi import FastAPI, Request, Form, Cookie, Header, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -575,3 +579,50 @@ async def api_delete_alias(address: str, authorization: str | None = Header(defa
     cur.close()
     conn.close()
     return {"deleted": address}
+
+
+class SendEmailIn(BaseModel):
+    from_email: str
+    to: list[str]
+    subject: str
+    body: str
+    body_html: str = ""
+    reply_to_id: str = ""
+
+
+@app.post("/api/send", status_code=200)
+async def api_send_email(body: SendEmailIn, authorization: str | None = Header(default=None)):
+    api_auth(authorization)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT username FROM mailbox WHERE username=%s AND active=1", (body.from_email,))
+    if not cur.fetchone():
+        cur.close()
+        conn.close()
+        raise HTTPException(400, "from_email not a valid active mailbox")
+    cur.close()
+    conn.close()
+
+    if body.body_html:
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(body.body, "plain", "utf-8"))
+        msg.attach(MIMEText(body.body_html, "html", "utf-8"))
+    else:
+        msg = MIMEText(body.body, "plain", "utf-8")
+
+    msg["From"] = body.from_email
+    msg["To"] = ", ".join(body.to)
+    msg["Subject"] = body.subject
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=body.from_email.split("@")[1])
+    if body.reply_to_id:
+        msg["In-Reply-To"] = body.reply_to_id
+        msg["References"] = body.reply_to_id
+
+    try:
+        with smtplib.SMTP("127.0.0.1", 25, timeout=10) as smtp:
+            smtp.sendmail(body.from_email, body.to, msg.as_string())
+    except Exception as e:
+        raise HTTPException(500, f"SMTP error: {e}")
+
+    return {"sent": True, "from": body.from_email, "to": body.to, "message_id": msg["Message-ID"]}
