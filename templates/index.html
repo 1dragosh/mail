@@ -202,11 +202,14 @@
         </div>
       </form>
     </div>
+    <div class="px-4 py-2 border-bottom">
+      <input type="search" id="mbx-search" class="form-control form-control-sm" placeholder="Search mailboxes…" style="max-width:320px" oninput="filterMailboxes(this.value)">
+    </div>
     <table class="table mb-0">
       <thead><tr>
         <th class="ps-4">Email</th><th>Name</th><th>Forwards to</th><th>Received</th><th>Unread</th><th>Sent</th><th>Status</th><th></th>
       </tr></thead>
-      <tbody>
+      <tbody id="mbx-tbody">
       {% for m in mailboxes %}
       {% set forwards = [] %}
       {% if m.goto %}
@@ -214,7 +217,7 @@
           {% if d.strip() and d.strip() != m.username %}{% set _ = forwards.append(d.strip()) %}{% endif %}
         {% endfor %}
       {% endif %}
-      <tr>
+      <tr data-mbx="{{ (m.username ~ ' ' ~ (m.name or '') ~ ' ' ~ (m.goto or ''))|lower }}">
         <td class="ps-4 fw-medium">{{ m.username }}</td>
         <td class="text-muted">{{ m.name or '—' }}</td>
         <td class="text-muted small">
@@ -346,6 +349,12 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
+function filterMailboxes(q) {
+  q = q.toLowerCase();
+  document.querySelectorAll('#mbx-tbody tr[data-mbx]').forEach(tr => {
+    tr.style.display = tr.dataset.mbx.includes(q) ? '' : 'none';
+  });
+}
 function copyText(id, btn) {
   const text = document.getElementById(id).textContent.trim();
   navigator.clipboard.writeText(text).then(() => {
