@@ -149,13 +149,16 @@
         </div>
       </form>
     </div>
+    <div class="px-4 py-2 border-bottom">
+      <input type="search" class="form-control form-control-sm" placeholder="Search domains…" style="max-width:320px" oninput="filterTable('dom-tbody', this.value)">
+    </div>
     <table class="table mb-0">
       <thead><tr>
         <th class="ps-4">Domain</th><th>Description</th><th>Mailboxes</th><th>Aliases</th><th>Status</th><th>DNS</th><th></th>
       </tr></thead>
-      <tbody>
+      <tbody id="dom-tbody">
       {% for d in domains %}
-      <tr>
+      <tr data-row="{{ (d.domain ~ ' ' ~ (d.description or ''))|lower }}">
         <td class="ps-4 fw-medium">{{ d.domain }}</td>
         <td class="text-muted">{{ d.description or '—' }}</td>
         <td class="text-muted">{{ mailboxes | selectattr('domain', 'equalto', d.domain) | list | length }}</td>
@@ -203,7 +206,7 @@
       </form>
     </div>
     <div class="px-4 py-2 border-bottom">
-      <input type="search" id="mbx-search" class="form-control form-control-sm" placeholder="Search mailboxes…" style="max-width:320px" oninput="filterMailboxes(this.value)">
+      <input type="search" class="form-control form-control-sm" placeholder="Search mailboxes…" style="max-width:320px" oninput="filterTable('mbx-tbody', this.value)">
     </div>
     <table class="table mb-0">
       <thead><tr>
@@ -217,7 +220,7 @@
           {% if d.strip() and d.strip() != m.username %}{% set _ = forwards.append(d.strip()) %}{% endif %}
         {% endfor %}
       {% endif %}
-      <tr data-mbx="{{ (m.username ~ ' ' ~ (m.name or '') ~ ' ' ~ (m.goto or ''))|lower }}">
+      <tr data-row="{{ (m.username ~ ' ' ~ (m.name or '') ~ ' ' ~ (m.goto or ''))|lower }}">
         <td class="ps-4 fw-medium">{{ m.username }}</td>
         <td class="text-muted">{{ m.name or '—' }}</td>
         <td class="text-muted small">
@@ -264,13 +267,16 @@
         </div>
       </form>
     </div>
+    <div class="px-4 py-2 border-bottom">
+      <input type="search" class="form-control form-control-sm" placeholder="Search aliases…" style="max-width:320px" oninput="filterTable('ali-tbody', this.value)">
+    </div>
     <table class="table mb-0">
       <thead><tr>
         <th class="ps-4">Address</th><th>Forwards to</th><th>Domain</th><th>Status</th><th></th>
       </tr></thead>
-      <tbody>
+      <tbody id="ali-tbody">
       {% for a in aliases %}
-      <tr>
+      <tr data-row="{{ (a.address ~ ' ' ~ (a.goto or '') ~ ' ' ~ a.domain)|lower }}">
         <td class="ps-4 fw-medium">{{ a.address }}</td>
         <td class="text-muted small">
           {% set dests = [] %}
@@ -311,13 +317,16 @@
         </div>
       </form>
     </div>
+    <div class="px-4 py-2 border-bottom">
+      <input type="search" class="form-control form-control-sm" placeholder="Search API keys…" style="max-width:320px" oninput="filterTable('key-tbody', this.value)">
+    </div>
     <table class="table mb-0">
       <thead><tr>
         <th class="ps-4">Name</th><th>Key</th><th>Created</th><th></th>
       </tr></thead>
-      <tbody>
+      <tbody id="key-tbody">
       {% for k in api_keys %}
-      <tr>
+      <tr data-row="{{ k.name|lower }}">
         <td class="ps-4 fw-medium">{{ k.name }}</td>
         <td>
           <span class="font-monospace small text-muted" id="k-{{ k.id }}">{{ k.key_value }}</span>
@@ -349,10 +358,10 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-function filterMailboxes(q) {
+function filterTable(tbodyId, q) {
   q = q.toLowerCase();
-  document.querySelectorAll('#mbx-tbody tr[data-mbx]').forEach(tr => {
-    tr.style.display = tr.dataset.mbx.includes(q) ? '' : 'none';
+  document.querySelectorAll('#' + tbodyId + ' tr[data-row]').forEach(tr => {
+    tr.style.display = tr.dataset.row.includes(q) ? '' : 'none';
   });
 }
 function copyText(id, btn) {
