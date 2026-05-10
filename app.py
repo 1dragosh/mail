@@ -1,4 +1,5 @@
 import email as stdlib_email
+import html as _html
 import imaplib
 import os
 import re
@@ -581,22 +582,46 @@ def _decode_str(value):
     return "".join(result)
 
 
+def _clean_text(text):
+    text = re.sub(r'[\u00ad\u034f\u200b-\u200f\u2028\u2029\ufeff]', '', text)
+    text = _html.unescape(text)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
 def _parse_imap_msg(uid, raw):
     msg = stdlib_email.message_from_bytes(raw)
     body = ""
+    body_html = ""
     if msg.is_multipart():
         for part in msg.walk():
-            if part.get_content_type() == "text/plain" and "attachment" not in str(part.get("Content-Disposition", "")):
+            ct = part.get_content_type()
+            disp = str(part.get("Content-Disposition", ""))
+            if "attachment" in disp:
+                continue
+            if ct == "text/plain" and not body:
                 try:
                     body = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="replace")
-                    break
+                except Exception:
+                    pass
+            elif ct == "text/html" and not body_html:
+                try:
+                    body_html = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="replace")
                 except Exception:
                     pass
     else:
         try:
-            body = msg.get_payload(decode=True).decode(msg.get_content_charset() or "utf-8", errors="replace")
+            raw_body = msg.get_payload(decode=True).decode(msg.get_content_charset() or "utf-8", errors="replace")
+            if msg.get_content_type() == "text/html":
+                body_html = raw_body
+            else:
+                body = raw_body
         except Exception:
-            body = ""
+            pass
+    if not body and body_html:
+        body = re.sub(r'<[^>]+>', ' ', body_html)
+        body = re.sub(r'\s+', ' ', body).strip()
     return {
         "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
         "from": _decode_str(msg.get("From", "")),
@@ -604,7 +629,8 @@ def _parse_imap_msg(uid, raw):
         "subject": _decode_str(msg.get("Subject", "(no subject)")),
         "date": msg.get("Date", ""),
         "message_id": msg.get("Message-ID", ""),
-        "body": body[:3000],
+        "body": _clean_text(body[:5000]),
+        "body_html": body_html[:80000],
     }
 
 
