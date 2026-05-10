@@ -3,6 +3,7 @@ import os
 import re
 import secrets
 import smtplib
+import subprocess
 import time
 import httpx
 import mysql.connector
@@ -92,6 +93,15 @@ def _dkim_value(domain):
         return "".join(parts)
     except Exception:
         return ""
+
+
+def _generate_dkim(domain):
+    result = subprocess.run(
+        ["sudo", "/opt/mailmanager/gen-dkim.sh", domain],
+        capture_output=True, text=True, timeout=30
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "gen-dkim.sh failed")
 
 
 def dns_for(domain):
@@ -447,7 +457,24 @@ async def api_add_domain(body: DomainIn, authorization: str | None = Header(defa
     conn.commit()
     cur.close()
     conn.close()
+    try:
+        _generate_dkim(body.domain)
+    except Exception:
+        pass
     return {"domain": body.domain, "description": body.description, "active": True, "dns_records": dns_for(body.domain)}
+
+
+@app.post("/api/domains/{domain}/dkim", status_code=200)
+async def api_generate_dkim(domain: str, authorization: str | None = Header(default=None)):
+    api_auth(authorization)
+    try:
+        _generate_dkim(domain)
+    except Exception as e:
+        raise HTTPException(500, f"DKIM generation failed: {e}")
+    dkim = _dkim_value(domain)
+    if not dkim:
+        raise HTTPException(500, "DKIM key generated but could not be read")
+    return {"domain": domain, "selector": "mail", "dkim": dkim}
 
 
 @app.get("/api/domains/{domain}/dns")

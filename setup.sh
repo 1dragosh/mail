@@ -251,6 +251,12 @@ echo "DKIM public key pentru DNS (adauga ca TXT record):"
 cat /etc/opendkim/keys/${MAIL_DOMAIN}/mail.txt
 echo ""
 
+cp "$(dirname "$0")/gen-dkim.sh" /opt/mailmanager/gen-dkim.sh
+chmod 750 /opt/mailmanager/gen-dkim.sh
+chown root:root /opt/mailmanager/gen-dkim.sh
+echo "www-data ALL=(ALL) NOPASSWD: /opt/mailmanager/gen-dkim.sh" > /etc/sudoers.d/mailmanager-dkim
+chmod 440 /etc/sudoers.d/mailmanager-dkim
+
 systemctl enable nginx "php${PHP_VER}-fpm" postfix
 systemctl restart nginx "php${PHP_VER}-fpm"
 
