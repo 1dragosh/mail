@@ -1,3 +1,4 @@
+import email as stdlib_email
 import imaplib
 import os
 import re
@@ -9,6 +10,7 @@ import httpx
 import mysql.connector
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from email.header import decode_header as _decode_header
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formatdate, make_msgid
@@ -564,6 +566,97 @@ async def api_add_mailbox(body: MailboxIn, authorization: str | None = Header(de
     cur.close()
     conn.close()
     return {"email": body.email, "forward_to": body.forward_to, "created": True}
+
+
+def _decode_str(value):
+    if not value:
+        return ""
+    parts = _decode_header(value)
+    result = []
+    for bval, charset in parts:
+        if isinstance(bval, bytes):
+            result.append(bval.decode(charset or "utf-8", errors="replace"))
+        else:
+            result.append(bval)
+    return "".join(result)
+
+
+def _parse_imap_msg(uid, raw):
+    msg = stdlib_email.message_from_bytes(raw)
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain" and "attachment" not in str(part.get("Content-Disposition", "")):
+                try:
+                    body = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="replace")
+                    break
+                except Exception:
+                    pass
+    else:
+        try:
+            body = msg.get_payload(decode=True).decode(msg.get_content_charset() or "utf-8", errors="replace")
+        except Exception:
+            body = ""
+    return {
+        "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
+        "from": _decode_str(msg.get("From", "")),
+        "to": _decode_str(msg.get("To", "")),
+        "subject": _decode_str(msg.get("Subject", "(no subject)")),
+        "date": msg.get("Date", ""),
+        "message_id": msg.get("Message-ID", ""),
+        "body": body[:3000],
+    }
+
+
+@app.get("/api/mailboxes/{email}/messages")
+async def api_list_messages(
+    email: str,
+    folder: str = "INBOX",
+    page: int = 1,
+    per_page: int = 25,
+    authorization: str | None = Header(default=None),
+):
+    api_auth(authorization)
+    try:
+        imap = imaplib.IMAP4("127.0.0.1", 143)
+        imap.login(f"{email}*admin", MASTER_PASS)
+        imap.select(folder)
+        _, data = imap.search(None, "ALL")
+        uids = data[0].split() if data[0] else []
+        total = len(uids)
+        uids_page = list(reversed(uids))[(page - 1) * per_page: page * per_page]
+        messages = []
+        for uid in uids_page:
+            try:
+                _, msg_data = imap.fetch(uid, "(RFC822)")
+                if msg_data and msg_data[0]:
+                    messages.append(_parse_imap_msg(uid, msg_data[0][1]))
+            except Exception:
+                pass
+        imap.logout()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return {"email": email, "folder": folder, "total": total, "page": page, "per_page": per_page, "messages": messages}
+
+
+@app.delete("/api/mailboxes/{email}/messages/{uid}")
+async def api_delete_message(
+    email: str,
+    uid: str,
+    folder: str = "INBOX",
+    authorization: str | None = Header(default=None),
+):
+    api_auth(authorization)
+    try:
+        imap = imaplib.IMAP4("127.0.0.1", 143)
+        imap.login(f"{email}*admin", MASTER_PASS)
+        imap.select(folder)
+        imap.store(uid.encode(), "+FLAGS", "\\Deleted")
+        imap.expunge()
+        imap.logout()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return {"deleted": uid}
 
 
 @app.delete("/api/mailboxes/{email:path}")
