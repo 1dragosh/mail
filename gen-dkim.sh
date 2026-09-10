@@ -11,8 +11,8 @@ if [ ! -f "$KEY_DIR/mail.private" ]; then
     opendkim-genkey -b 2048 -d "$DOMAIN" -D "$KEY_DIR" -s mail
     chown opendkim:opendkim "$KEY_DIR" "$KEY_DIR/mail.private" "$KEY_DIR/mail.txt"
     chmod 755 "$KEY_DIR"
-    chmod 640 "$KEY_DIR/mail.private"
-    chmod 644 "$KEY_DIR/mail.txt"
+    chmod 600 "$KEY_DIR/mail.private"
+    chmod 600 "$KEY_DIR/mail.txt"
 fi
 
 KEYTABLE_ENTRY="mail._domainkey.$DOMAIN $DOMAIN:mail:$KEY_DIR/mail.private"
