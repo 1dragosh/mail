@@ -70,6 +70,16 @@ async def lifespan(app):
         ")"
     )
     cur.execute(
+        "CREATE TABLE IF NOT EXISTS sender_rules ("
+        "id INT AUTO_INCREMENT PRIMARY KEY,"
+        "pattern VARCHAR(255) NOT NULL UNIQUE,"
+        "action VARCHAR(16) NOT NULL DEFAULT 'REJECT',"
+        "note VARCHAR(255) NOT NULL DEFAULT '',"
+        "active TINYINT(1) NOT NULL DEFAULT 1,"
+        "created DATETIME NOT NULL"
+        ")"
+    )
+    cur.execute(
         "CREATE TABLE IF NOT EXISTS bounce_log ("
         "id INT AUTO_INCREMENT PRIMARY KEY,"
         "qid VARCHAR(32) NOT NULL,"
@@ -459,6 +469,45 @@ def suppression_list(limit=200):
     return rows, total
 
 
+ACCESS_FILE = os.environ.get("ACCESS_FILE", "/opt/mailmanager/sender_access.txt")
+ACCESS_ACTIONS = ("REJECT", "DISCARD")
+_PATTERN_OK = re.compile(r"^[A-Za-z0-9._@+-]{3,255}$")
+
+
+def sender_rules():
+    conn = db()
+    cur = conn.cursor(dictionary=True)
+    cur.execute("SELECT id, pattern, action, note, active, created FROM sender_rules ORDER BY pattern")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def write_access_map():
+    rows = sender_rules()
+    lines = []
+    for r in rows:
+        if not r["active"]:
+            continue
+        note = re.sub(r"[\r\n]", " ", r["note"])[:120]
+        lines.append((r["pattern"] + "\t" + r["action"] + " " + note).rstrip())
+    with open(ACCESS_FILE, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    out = run_cmd(["sudo", "/opt/mailmanager/apply-access.sh"], timeout=40)
+    return "applied" in out, out.strip()[-200:]
+
+
+def queue_bounce_ids():
+    q = queue_summary()
+    ids = []
+    for it in q.get("entries", []):
+        sender = (it.get("sender") or "").strip()
+        if sender in ("", "MAILER-DAEMON"):
+            ids.append(it["id"])
+    return ids
+
+
 def ui_auth(auth):
     user = session_user(auth)
     if not user:
@@ -621,6 +670,7 @@ async def health_page(request: Request, auth: str | None = Cookie(default=None),
             "mail_log": MAIL_LOG,
             "suppressed": supp_rows,
             "suppressed_total": supp_total,
+            "rules": sender_rules(),
         },
     )
 
@@ -635,6 +685,73 @@ async def unsuppress(recipient: str = Form(...), auth: str | None = Cookie(defau
     cur.close()
     conn.close()
     return RedirectResponse("/health?msg=Removed+from+suppression+list", status_code=303)
+
+
+@app.post("/health/rules/add")
+async def rule_add(
+    pattern: str = Form(...),
+    action: str = Form("REJECT"),
+    note: str = Form(""),
+    auth: str | None = Cookie(default=None),
+):
+    ui_auth(auth)
+    clean = pattern.strip().lower().lstrip("@")
+    if not _PATTERN_OK.match(clean):
+        return RedirectResponse("/health?msg=Rejected:+not+a+valid+domain+or+address", status_code=303)
+    if action not in ACCESS_ACTIONS:
+        action = "REJECT"
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO sender_rules (pattern, action, note, active, created) "
+        "VALUES (%s,%s,%s,1,NOW()) "
+        "ON DUPLICATE KEY UPDATE action=VALUES(action), note=VALUES(note), active=1",
+        (clean, action, note.strip()[:255]),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    ok, detail = write_access_map()
+    return RedirectResponse(
+        "/health?msg=" + ("Rule+applied" if ok else "Saved+but+Postfix+refused:+" + detail[:80]),
+        status_code=303,
+    )
+
+
+@app.post("/health/rules/remove")
+async def rule_remove(rule_id: int = Form(...), auth: str | None = Cookie(default=None)):
+    ui_auth(auth)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM sender_rules WHERE id=%s", (rule_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    ok, detail = write_access_map()
+    return RedirectResponse(
+        "/health?msg=" + ("Rule+removed" if ok else "Removed+but+Postfix+refused:+" + detail[:80]),
+        status_code=303,
+    )
+
+
+@app.post("/health/queue-delete-bounces")
+async def queue_delete_bounces(auth: str | None = Cookie(default=None)):
+    ui_auth(auth)
+    ids = queue_bounce_ids()
+    for qid in ids:
+        run_cmd(["sudo", "/opt/mailmanager/queue-admin.sh", "delete", qid], timeout=20)
+    return RedirectResponse(
+        "/health?msg=Deleted+" + str(len(ids)) + "+undeliverable+bounce(s)", status_code=303
+    )
+
+
+@app.post("/health/queue-delete-all")
+async def queue_delete_all(confirm: str = Form(""), auth: str | None = Cookie(default=None)):
+    ui_auth(auth)
+    if confirm.strip().upper() != "DELETE":
+        return RedirectResponse("/health?msg=Type+DELETE+to+empty+the+queue", status_code=303)
+    run_cmd(["sudo", "/opt/mailmanager/queue-admin.sh", "delete-all"], timeout=60)
+    return RedirectResponse("/health?msg=Queue+emptied", status_code=303)
 
 
 @app.post("/health/queue-flush")
