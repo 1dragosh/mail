@@ -492,10 +492,15 @@ def write_access_map():
             continue
         note = re.sub(r"[\r\n]", " ", r["note"])[:120]
         lines.append((r["pattern"] + "\t" + r["action"] + " " + note).rstrip())
-    with open(ACCESS_FILE, "w") as fh:
-        fh.write("\n".join(lines) + "\n")
+    try:
+        with open(ACCESS_FILE, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except OSError as e:
+        return False, "cannot write " + ACCESS_FILE + ": " + str(e)
     out = run_cmd(["sudo", "/opt/mailmanager/apply-access.sh"], timeout=40)
-    return "applied" in out, out.strip()[-200:]
+    if "applied" not in out:
+        return False, (out.strip()[-200:] or "apply-access.sh produced no output, check its sudo rule")
+    return True, ""
 
 
 def queue_bounce_ids():
