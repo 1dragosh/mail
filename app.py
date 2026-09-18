@@ -355,6 +355,7 @@ def txt_has(name, needle):
 
 _FROM_RE = re.compile(r"postfix/[a-z]+\[[0-9]+\]: ([0-9A-F]{6,}): from=<([^>]*)>")
 _DSN_RE = re.compile(r"dsn=([0-9]\.[0-9]+\.[0-9]+)")
+NO_SUCH_ADDRESS = re.compile(r"^5\.1\.[0-9]+$")
 _MONTHS = {}
 
 
@@ -404,7 +405,7 @@ def ingest_mail_log():
 
     suppressed = 0
     for e in events:
-        if e["status"] != "bounced" or not e["dsn"].startswith("5."):
+        if e["status"] != "bounced" or not NO_SUCH_ADDRESS.match(e["dsn"]):
             continue
         if not e["sender"]:
             continue

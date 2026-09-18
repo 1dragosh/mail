@@ -204,9 +204,11 @@
           <span class="muted small">{{ suppressed_total }} address{{ '' if suppressed_total == 1 else 'es' }}</span>
         </div>
         <div class="muted small mb-3">
-          Addresses that hard bounced. <code>/api/send</code> refuses them, because mailing a
-          dead address again is one of the fastest ways to be treated as a spammer. Bounces of
-          forwarded mail are not listed here &mdash; those senders are usually forged.
+          Addresses that came back as no such mailbox (5.1.x). <code>/api/send</code> refuses
+          them, because mailing a dead address again is one of the fastest ways to be treated
+          as a spammer. A message turned away on content (5.7.x) or a routing loop (5.4.x)
+          does not land here &mdash; the address is fine, the delivery was not. Neither do
+          bounces of forwarded mail, whose senders are usually forged.
         </div>
         {% if suppressed %}
         <div class="table-responsive" style="max-height:340px;overflow:auto">
