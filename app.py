@@ -70,6 +70,29 @@ async def lifespan(app):
         ")"
     )
     cur.execute(
+        "CREATE TABLE IF NOT EXISTS bounce_log ("
+        "id INT AUTO_INCREMENT PRIMARY KEY,"
+        "qid VARCHAR(32) NOT NULL,"
+        "recipient VARCHAR(320) NOT NULL,"
+        "sender VARCHAR(320) NOT NULL DEFAULT '',"
+        "status VARCHAR(16) NOT NULL,"
+        "dsn VARCHAR(16) NOT NULL DEFAULT '',"
+        "reason VARCHAR(500) NOT NULL DEFAULT '',"
+        "seen_at DATETIME NOT NULL,"
+        "UNIQUE KEY uq_event (qid, recipient, status),"
+        "INDEX (recipient), INDEX (seen_at)"
+        ")"
+    )
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS suppression ("
+        "recipient VARCHAR(320) NOT NULL PRIMARY KEY,"
+        "dsn VARCHAR(16) NOT NULL DEFAULT '',"
+        "reason VARCHAR(500) NOT NULL DEFAULT '',"
+        "source VARCHAR(16) NOT NULL DEFAULT 'auto',"
+        "created DATETIME NOT NULL"
+        ")"
+    )
+    cur.execute(
         "CREATE TABLE IF NOT EXISTS api_keys ("
         "id INT AUTO_INCREMENT PRIMARY KEY,"
         "name VARCHAR(255) NOT NULL,"
@@ -330,6 +353,111 @@ def txt_has(name, needle):
     return needle.lower() in out.lower()
 
 
+_FROM_RE = re.compile(r"postfix/[a-z]+\[[0-9]+\]: ([0-9A-F]{6,}): from=<([^>]*)>")
+_DSN_RE = re.compile(r"dsn=([0-9]\.[0-9]+\.[0-9]+)")
+_MONTHS = {}
+
+
+def ingest_mail_log():
+    lines = read_mail_log()
+    if not lines:
+        return {"scanned": 0, "events": 0, "suppressed": 0}
+    senders = {}
+    events = []
+    for line in lines:
+        f = _FROM_RE.search(line)
+        if f:
+            senders[f.group(1)] = f.group(2).strip()
+            continue
+        m = _STATUS_RE.search(line)
+        if not m or m.group(1) not in ("bounced", "deferred", "expired"):
+            continue
+        qid = _QID_RE.search(line)
+        to = _TO_RE.search(line)
+        if not qid or not to:
+            continue
+        dsn = _DSN_RE.search(line)
+        reason = _REASON_RE.search(line)
+        events.append({
+            "qid": qid.group(1),
+            "recipient": to.group(1)[:320],
+            "sender": senders.get(qid.group(1), "")[:320],
+            "status": m.group(1),
+            "dsn": dsn.group(1) if dsn else "",
+            "reason": (reason.group(1) if reason else "")[:500],
+            "when": log_line_time(line),
+        })
+    if not events:
+        return {"scanned": len(lines), "events": 0, "suppressed": 0}
+
+    conn = db()
+    cur = conn.cursor()
+    stored = 0
+    for e in events:
+        cur.execute(
+            "INSERT IGNORE INTO bounce_log "
+            "(qid, recipient, sender, status, dsn, reason, seen_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (e["qid"], e["recipient"], e["sender"], e["status"], e["dsn"], e["reason"], e["when"]),
+        )
+        stored += cur.rowcount
+
+    suppressed = 0
+    for e in events:
+        if e["status"] != "bounced" or not e["dsn"].startswith("5."):
+            continue
+        if not e["sender"]:
+            continue
+        cur.execute(
+            "INSERT IGNORE INTO suppression (recipient, dsn, reason, source, created) "
+            "VALUES (%s,%s,%s,'auto',NOW())",
+            (e["recipient"], e["dsn"], e["reason"]),
+        )
+        suppressed += cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"scanned": len(lines), "events": stored, "suppressed": suppressed}
+
+
+def log_line_time(line):
+    head = line.split()[0] if line else ""
+    m = re.match(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})", head)
+    if m:
+        return m.group(1) + " " + m.group(2)
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def suppressed_recipients(addresses):
+    wanted = [a.strip().lower() for a in addresses if a and a.strip()]
+    if not wanted:
+        return set()
+    conn = db()
+    cur = conn.cursor()
+    marks = ",".join(["%s"] * len(wanted))
+    cur.execute("SELECT recipient FROM suppression WHERE LOWER(recipient) IN (" + marks + ")", wanted)
+    hits = {r[0].lower() for r in cur.fetchall()}
+    cur.close()
+    conn.close()
+    return hits
+
+
+def suppression_list(limit=200):
+    conn = db()
+    cur = conn.cursor(dictionary=True)
+    cur.execute(
+        "SELECT recipient, dsn, reason, source, created FROM suppression "
+        "ORDER BY created DESC LIMIT %s",
+        (limit,),
+    )
+    rows = cur.fetchall()
+    cur.execute("SELECT COUNT(*) AS n FROM suppression")
+    total = cur.fetchone()["n"]
+    cur.close()
+    conn.close()
+    return rows, total
+
+
 def ui_auth(auth):
     user = session_user(auth)
     if not user:
@@ -475,6 +603,11 @@ async def health_page(request: Request, auth: str | None = Cookie(default=None),
     domains = cur.fetchall()
     cur.close()
     conn.close()
+    try:
+        ingest_mail_log()
+    except Exception:
+        pass
+    supp_rows, supp_total = suppression_list()
     return templates.TemplateResponse(
         request,
         "health.html",
@@ -485,8 +618,22 @@ async def health_page(request: Request, auth: str | None = Cookie(default=None),
             "log": log_health(),
             "domains": domain_mail_health(domains),
             "mail_log": MAIL_LOG,
+            "suppressed": supp_rows,
+            "suppressed_total": supp_total,
         },
     )
+
+
+@app.post("/health/unsuppress")
+async def unsuppress(recipient: str = Form(...), auth: str | None = Cookie(default=None)):
+    ui_auth(auth)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM suppression WHERE recipient=%s", (recipient.strip(),))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return RedirectResponse("/health?msg=Removed+from+suppression+list", status_code=303)
 
 
 @app.post("/health/queue-flush")
@@ -1065,6 +1212,15 @@ async def api_send_email(body: SendEmailIn, authorization: str | None = Header(d
     cur.close()
     conn.close()
 
+    blocked = suppressed_recipients(body.to)
+    targets = [t for t in body.to if t.strip().lower() not in blocked]
+    if not targets:
+        raise HTTPException(
+            422,
+            "every recipient is on the suppression list after a hard bounce: "
+            + ", ".join(sorted(blocked)),
+        )
+
     if body.body_html:
         msg = MIMEMultipart("alternative")
         msg.attach(MIMEText(body.body, "plain", "utf-8"))
@@ -1073,7 +1229,7 @@ async def api_send_email(body: SendEmailIn, authorization: str | None = Header(d
         msg = MIMEText(body.body, "plain", "utf-8")
 
     msg["From"] = body.from_email
-    msg["To"] = ", ".join(body.to)
+    msg["To"] = ", ".join(targets)
     msg["Subject"] = body.subject
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid(domain=body.from_email.split("@")[1])
@@ -1085,7 +1241,7 @@ async def api_send_email(body: SendEmailIn, authorization: str | None = Header(d
 
     try:
         with smtplib.SMTP("127.0.0.1", 25, timeout=10) as smtp:
-            smtp.sendmail(body.from_email, body.to, raw)
+            smtp.sendmail(body.from_email, targets, raw)
     except Exception as e:
         raise HTTPException(500, f"SMTP error: {e}")
 

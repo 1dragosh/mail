@@ -199,6 +199,43 @@
 
     <div class="col-12">
       <div class="card"><div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <h6 class="mb-0">Suppression list</h6>
+          <span class="muted small">{{ suppressed_total }} address{{ '' if suppressed_total == 1 else 'es' }}</span>
+        </div>
+        <div class="muted small mb-3">
+          Addresses that hard bounced. <code>/api/send</code> refuses them, because mailing a
+          dead address again is one of the fastest ways to be treated as a spammer. Bounces of
+          forwarded mail are not listed here &mdash; those senders are usually forged.
+        </div>
+        {% if suppressed %}
+        <div class="table-responsive" style="max-height:340px;overflow:auto">
+          <table class="table table-sm table-hover mb-0">
+            <thead><tr><th>Address</th><th>Code</th><th>Reason</th><th>Added</th><th></th></tr></thead>
+            <tbody>
+            {% for r in suppressed %}
+              <tr>
+                <td class="mono">{{ r.recipient }}</td>
+                <td class="mono">{{ r.dsn }}</td>
+                <td class="muted">{{ r.reason[:70] }}</td>
+                <td class="muted">{{ r.created }}</td>
+                <td class="text-end">
+                  <form method="post" action="/health/unsuppress" class="m-0">
+                    <input type="hidden" name="recipient" value="{{ r.recipient }}">
+                    <button class="btn btn-sm btn-outline-secondary py-0">Allow again</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}<div class="muted small">Nothing suppressed.</div>{% endif %}
+      </div></div>
+    </div>
+
+    <div class="col-12">
+      <div class="card"><div class="card-body">
         <h6 class="mb-3">Domain authentication</h6>
         <div class="table-responsive" style="max-height:460px;overflow:auto">
           <table class="table table-sm table-hover mb-0">
