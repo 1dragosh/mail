@@ -82,11 +82,16 @@
 
   {% if (log.fail_pct or 0) > 40 %}
   <div class="alert alert-danger py-2 small">
-    Most delivery attempts are failing. A mailbox that forwards spam onward makes the
-    server look like a spam source to Gmail and the like, which is what pushes legitimate
-    mail into their spam folders.
+    Most messages are failing to deliver. Accepting mail and forwarding it on to somewhere
+    that rejects it makes this whole IP look like a spam source, which is what pushes
+    legitimate mail into other people's spam folders.
   </div>
   {% endif %}
+
+  <div class="muted small mb-3">
+    Counts are distinct messages, not delivery attempts &mdash; one stuck message is retried
+    for days and would otherwise dominate every number on this page.
+  </div>
 
   <div class="row g-3">
 

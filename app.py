@@ -157,6 +157,7 @@ def session_user(token):
 MAIL_LOG = os.environ.get("MAIL_LOG", "/var/log/mail.log")
 
 _STATUS_RE = re.compile(r"status=(sent|deferred|bounced|expired)")
+_QID_RE = re.compile(r"postfix/[a-z]+\[[0-9]+\]: ([0-9A-F]{6,}):")
 _TO_RE = re.compile(r"to=<([^>]*)>")
 _REASON_RE = re.compile(r"status=(?:deferred|bounced|expired) \((.*)\)\s*$")
 _RBL_RE = re.compile(r"blocked using ([a-z0-9.\-]+)", re.I)
@@ -232,6 +233,7 @@ def log_health():
     lines = read_mail_log()
     if not lines:
         return {"available": False}
+    final = {}
     counts = defaultdict(int)
     reasons = defaultdict(int)
     rbl = defaultdict(int)
@@ -240,7 +242,11 @@ def log_health():
     for line in lines:
         m = _STATUS_RE.search(line)
         if m:
-            counts[m.group(1)] += 1
+            qid = _QID_RE.search(line)
+            if qid:
+                final[qid.group(1)] = m.group(1)
+            else:
+                counts[m.group(1)] += 1
             if m.group(1) in ("deferred", "bounced", "expired"):
                 rm = _REASON_RE.search(line)
                 if rm:
@@ -265,6 +271,8 @@ def log_health():
                     "ip": rj.group(3),
                     "list": key,
                 })
+    for status in final.values():
+        counts[status] += 1
     sent = counts.get("sent", 0)
     failed = counts.get("deferred", 0) + counts.get("bounced", 0) + counts.get("expired", 0)
     total = sent + failed
@@ -274,6 +282,7 @@ def log_health():
         "deferred": counts.get("deferred", 0),
         "bounced": counts.get("bounced", 0),
         "expired": counts.get("expired", 0),
+        "retry_lines": len(lines),
         "fail_pct": round(100.0 * failed / total, 1) if total else 0.0,
         "reasons": sorted(reasons.items(), key=lambda kv: -kv[1])[:10],
         "rbl": sorted(rbl.items(), key=lambda kv: -kv[1]),
