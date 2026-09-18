@@ -1320,6 +1320,7 @@ class SendEmailIn(BaseModel):
     body: str
     body_html: str = ""
     reply_to_id: str = ""
+    unsubscribe_url: str = ""
 
 
 @app.post("/api/send", status_code=200)
@@ -1359,6 +1360,12 @@ async def api_send_email(body: SendEmailIn, authorization: str | None = Header(d
     if body.reply_to_id:
         msg["In-Reply-To"] = body.reply_to_id
         msg["References"] = body.reply_to_id
+    if body.unsubscribe_url:
+        u = body.unsubscribe_url.strip()
+        if not u.startswith("https://"):
+            raise HTTPException(400, "unsubscribe_url must be https")
+        msg["List-Unsubscribe"] = "<" + u + ">"
+        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
     raw = msg.as_bytes()
 
