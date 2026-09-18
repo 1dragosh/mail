@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mail Manager — Health</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+  body { background:#0f172a; color:#e2e8f0; }
+  .card { background:#1e293b; border:1px solid #334155; border-radius:10px; }
+  .brand { font-size:1.15rem; font-weight:700; color:#6366f1; letter-spacing:-.5px; }
+  .stat { font-size:1.6rem; font-weight:700; line-height:1.1; }
+  .stat-label { font-size:.72rem; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; }
+  table { color:#e2e8f0; font-size:.83rem; }
+  .table > :not(caption) > * > * { background:transparent; color:#e2e8f0; border-color:#334155; }
+  code { color:#a5b4fc; }
+  .muted { color:#94a3b8; }
+  .nav-link { color:#94a3b8; }
+  .nav-link.active { background:#334155 !important; color:#fff !important; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.78rem; }
+</style>
+</head>
+<body>
+<div class="container-fluid p-4" style="max-width:1400px">
+
+  <div class="d-flex align-items-center justify-content-between mb-4">
+    <div class="brand">⬡ Mail Manager</div>
+    <div class="d-flex gap-3 align-items-center">
+      <span class="muted small">{{ user }}</span>
+      <a href="/" class="btn btn-sm btn-outline-secondary">Domains</a>
+      <a href="/logout" class="btn btn-sm btn-outline-danger">Sign out</a>
+    </div>
+  </div>
+
+  {% if msg %}<div class="alert alert-info py-2 small">{{ msg }}</div>{% endif %}
+
+  {% if not log.available %}
+    <div class="alert alert-warning py-2 small">
+      Cannot read <code>{{ mail_log }}</code>. The service user needs to be in the
+      <code>adm</code> group for delivery stats to appear.
+    </div>
+  {% endif %}
+
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-md-2">
+      <div class="card h-100"><div class="card-body py-3">
+        <div class="stat text-success">{{ log.sent or 0 }}</div>
+        <div class="stat-label">Delivered</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-md-2">
+      <div class="card h-100"><div class="card-body py-3">
+        <div class="stat text-warning">{{ log.deferred or 0 }}</div>
+        <div class="stat-label">Deferred</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-md-2">
+      <div class="card h-100"><div class="card-body py-3">
+        <div class="stat text-danger">{{ log.bounced or 0 }}</div>
+        <div class="stat-label">Bounced</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-md-2">
+      <div class="card h-100"><div class="card-body py-3">
+        <div class="stat {% if (log.fail_pct or 0) > 40 %}text-danger{% else %}text-info{% endif %}">{{ log.fail_pct or 0 }}%</div>
+        <div class="stat-label">Failure rate</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-md-2">
+      <div class="card h-100"><div class="card-body py-3">
+        <div class="stat">{{ queue.count }}</div>
+        <div class="stat-label">In queue</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-md-2">
+      <div class="card h-100"><div class="card-body py-3">
+        <div class="stat">{{ queue.size_kb }}<span class="fs-6 muted"> KB</span></div>
+        <div class="stat-label">Queue size</div>
+      </div></div>
+    </div>
+  </div>
+
+  {% if (log.fail_pct or 0) > 40 %}
+  <div class="alert alert-danger py-2 small">
+    Most delivery attempts are failing. A mailbox that forwards spam onward makes the
+    server look like a spam source to Gmail and the like, which is what pushes legitimate
+    mail into their spam folders.
+  </div>
+  {% endif %}
+
+  <div class="row g-3">
+
+    <div class="col-lg-6">
+      <div class="card h-100"><div class="card-body">
+        <h6 class="mb-3">Why deliveries fail</h6>
+        {% if log.reasons %}
+        <table class="table table-sm mb-0">
+          <tbody>
+          {% for reason, n in log.reasons %}
+            <tr><td>{{ reason }}</td><td class="text-end muted">{{ n }}</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}<div class="muted small">Nothing recorded.</div>{% endif %}
+      </div></div>
+    </div>
+
+    <div class="col-lg-6">
+      <div class="card h-100"><div class="card-body">
+        <h6 class="mb-3">Blocklist hits</h6>
+        {% if log.rbl %}
+          <table class="table table-sm mb-3">
+            <tbody>
+            {% for name, n in log.rbl %}
+              <tr><td class="mono">{{ name }}</td><td class="text-end muted">{{ n }}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+          <div class="muted small">
+            <strong>would block</strong> means observation mode: the mail was still accepted.
+          </div>
+        {% else %}
+          <div class="muted small">No blocklist rejections recorded.</div>
+        {% endif %}
+      </div></div>
+    </div>
+
+    <div class="col-12">
+      <div class="card"><div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h6 class="mb-0">Mail queue</h6>
+          <form method="post" action="/health/queue-flush" class="m-0">
+            <button class="btn btn-sm btn-outline-info">Retry queue now</button>
+          </form>
+        </div>
+        {% if queue.items %}
+        <div class="table-responsive">
+          <table class="table table-sm table-hover mb-0">
+            <thead><tr><th>ID</th><th>Age</th><th>From</th><th>To</th><th>Held because</th></tr></thead>
+            <tbody>
+            {% for it in queue.items %}
+              <tr>
+                <td class="mono">{{ it.id }}</td>
+                <td class="muted">{{ it.when }}</td>
+                <td class="mono">{{ it.sender[:38] }}</td>
+                <td class="mono">{{ it.rcpt[:38] }}</td>
+                <td class="muted">{{ it.reason[:70] }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}<div class="muted small">Queue is empty.</div>{% endif %}
+      </div></div>
+    </div>
+
+    <div class="col-lg-6">
+      <div class="card h-100"><div class="card-body">
+        <h6 class="mb-3">Recent bounces</h6>
+        {% if log.bounces %}
+        <div class="table-responsive" style="max-height:340px;overflow:auto">
+          <table class="table table-sm mb-0">
+            <tbody>
+            {% for b in log.bounces %}
+              <tr><td class="mono">{{ b.to[:34] }}</td><td class="muted">{{ b.reason }}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}<div class="muted small">No bounces recorded.</div>{% endif %}
+      </div></div>
+    </div>
+
+    <div class="col-lg-6">
+      <div class="card h-100"><div class="card-body">
+        <h6 class="mb-3">Recent blocklist rejections</h6>
+        {% if log.rejects %}
+        <div class="table-responsive" style="max-height:340px;overflow:auto">
+          <table class="table table-sm mb-0">
+            <tbody>
+            {% for r in log.rejects %}
+              <tr>
+                <td>{% if r.mode == 'blocked' %}<span class="badge bg-danger">blocked</span>{% else %}<span class="badge bg-secondary">would block</span>{% endif %}</td>
+                <td class="mono">{{ r.ip }}</td>
+                <td class="mono muted">{{ r.list }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}<div class="muted small">Nothing rejected.</div>{% endif %}
+      </div></div>
+    </div>
+
+    <div class="col-12">
+      <div class="card"><div class="card-body">
+        <h6 class="mb-3">Domain authentication</h6>
+        <div class="table-responsive" style="max-height:460px;overflow:auto">
+          <table class="table table-sm table-hover mb-0">
+            <thead><tr><th>Domain</th><th>DKIM key</th><th>DKIM in DNS</th><th>SPF</th><th>DMARC</th></tr></thead>
+            <tbody>
+            {% for d in domains %}
+              <tr>
+                <td class="mono">{{ d.domain }}</td>
+                <td>{% if d.dkim_local %}<span class="text-success">yes</span>{% else %}<span class="text-danger">missing</span>{% endif %}</td>
+                <td>{% if d.dkim_dns %}<span class="text-success">published</span>{% else %}<span class="text-danger">not published</span>{% endif %}</td>
+                <td>{% if d.spf %}<span class="text-success">yes</span>{% else %}<span class="text-warning">none</span>{% endif %}</td>
+                <td>{% if d.dmarc %}<span class="text-success">yes</span>{% else %}<span class="text-warning">none</span>{% endif %}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="muted small mt-2">
+          A key present locally but not published in DNS means nothing can verify the
+          signatures this server adds.
+        </div>
+      </div></div>
+    </div>
+
+  </div>
+
+  <div class="muted small mt-4">
+    Read from <code>{{ mail_log }}</code>{% if log.lines_scanned %} — {{ log.lines_scanned }} lines scanned{% endif %}.
+  </div>
+
+</div>
+</body>
+</html>

@@ -18,7 +18,7 @@ from email.utils import formatdate, make_msgid
 from fastapi import FastAPI, Request, Form, Cookie, Header, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
-from passlib.hash import md5_crypt
+from passlib.hash import md5_crypt, pbkdf2_sha256
 from pydantic import BaseModel
 
 MAIL_SERVER = os.environ["MAIL_SERVER"]
@@ -50,6 +50,25 @@ def db():
 async def lifespan(app):
     conn = db()
     cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS ui_users ("
+        "id INT AUTO_INCREMENT PRIMARY KEY,"
+        "username VARCHAR(255) NOT NULL UNIQUE,"
+        "password_hash VARCHAR(255) NOT NULL,"
+        "created DATETIME NOT NULL,"
+        "last_login DATETIME NULL,"
+        "active TINYINT(1) DEFAULT 1"
+        ")"
+    )
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS ui_sessions ("
+        "token VARCHAR(64) NOT NULL PRIMARY KEY,"
+        "username VARCHAR(255) NOT NULL,"
+        "created DATETIME NOT NULL,"
+        "expires DATETIME NOT NULL,"
+        "INDEX (expires)"
+        ")"
+    )
     cur.execute(
         "CREATE TABLE IF NOT EXISTS api_keys ("
         "id INT AUTO_INCREMENT PRIMARY KEY,"
@@ -119,9 +138,194 @@ def dns_for(domain):
     return records
 
 
+def session_user(token):
+    if not token:
+        return ""
+    conn = db()
+    cur = conn.cursor(dictionary=True)
+    cur.execute(
+        "SELECT u.username FROM ui_sessions s JOIN ui_users u ON u.username=s.username "
+        "WHERE s.token=%s AND s.expires > NOW() AND u.active=1",
+        (token,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row["username"] if row else ""
+
+
+MAIL_LOG = os.environ.get("MAIL_LOG", "/var/log/mail.log")
+
+_STATUS_RE = re.compile(r"status=(sent|deferred|bounced|expired)")
+_TO_RE = re.compile(r"to=<([^>]*)>")
+_REASON_RE = re.compile(r"status=(?:deferred|bounced|expired) \((.*)\)\s*$")
+_RBL_RE = re.compile(r"blocked using ([a-z0-9.\-]+)", re.I)
+_REJECT_RE = re.compile(r"NOQUEUE: (reject|reject_warning): RCPT from ([^\[]*)\[([0-9a-f.:]+)\]")
+
+
+def run_cmd(cmd, timeout=20):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout
+    except Exception:
+        return ""
+
+
+def read_mail_log(max_lines=40000):
+    try:
+        with open(MAIL_LOG, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            chunk = min(size, max_lines * 200)
+            fh.seek(size - chunk)
+            data = fh.read().decode("utf-8", "replace")
+        return data.splitlines()[-max_lines:]
+    except Exception:
+        return []
+
+
+def queue_summary():
+    out = run_cmd(["postqueue", "-p"])
+    if not out.strip():
+        return {"available": False, "count": 0, "size_kb": 0, "items": []}
+    items = []
+    total = 0
+    size_kb = 0
+    tail = out.strip().splitlines()[-1]
+    m = re.search(r"--\s*([0-9]+)\s*Kbytes in\s*([0-9]+)\s*Request", tail)
+    if m:
+        size_kb = int(m.group(1))
+        total = int(m.group(2))
+    block = []
+    for line in out.splitlines():
+        if not line.strip():
+            if block:
+                items.append(parse_queue_block(block))
+                block = []
+            continue
+        if line.startswith("-") or line.startswith("Mail queue"):
+            continue
+        block.append(line)
+    if block:
+        items.append(parse_queue_block(block))
+    items = [i for i in items if i.get("id")]
+    return {"available": True, "count": total or len(items), "size_kb": size_kb, "items": items[:60]}
+
+
+def parse_queue_block(block):
+    head = block[0].split()
+    qid = head[0].rstrip("*!") if head else ""
+    sender = head[-1] if len(head) > 3 else ""
+    when = " ".join(head[2:6]) if len(head) > 6 else ""
+    reason = ""
+    rcpt = ""
+    for line in block[1:]:
+        t = line.strip()
+        if t.startswith("(") and t.endswith(")"):
+            reason = t[1:-1]
+        elif "@" in t:
+            rcpt = t
+    return {"id": qid, "sender": sender, "when": when, "rcpt": rcpt, "reason": reason}
+
+
+def log_health():
+    lines = read_mail_log()
+    if not lines:
+        return {"available": False}
+    counts = defaultdict(int)
+    reasons = defaultdict(int)
+    rbl = defaultdict(int)
+    rejects = []
+    bounces = []
+    for line in lines:
+        m = _STATUS_RE.search(line)
+        if m:
+            counts[m.group(1)] += 1
+            if m.group(1) in ("deferred", "bounced", "expired"):
+                rm = _REASON_RE.search(line)
+                if rm:
+                    reasons[shorten_reason(rm.group(1))] += 1
+                if m.group(1) == "bounced" and len(bounces) < 40:
+                    tm = _TO_RE.search(line)
+                    bounces.append({
+                        "when": " ".join(line.split()[:1]),
+                        "to": tm.group(1) if tm else "",
+                        "reason": shorten_reason(rm.group(1)) if rm else "",
+                    })
+        rj = _REJECT_RE.search(line)
+        if rj:
+            bl = _RBL_RE.search(line)
+            key = bl.group(1) if bl else "other"
+            rbl[key] += 1
+            if len(rejects) < 60:
+                rejects.append({
+                    "when": " ".join(line.split()[:1]),
+                    "mode": "would block" if rj.group(1) == "reject_warning" else "blocked",
+                    "host": rj.group(2).strip() or "-",
+                    "ip": rj.group(3),
+                    "list": key,
+                })
+    sent = counts.get("sent", 0)
+    failed = counts.get("deferred", 0) + counts.get("bounced", 0) + counts.get("expired", 0)
+    total = sent + failed
+    return {
+        "available": True,
+        "sent": sent,
+        "deferred": counts.get("deferred", 0),
+        "bounced": counts.get("bounced", 0),
+        "expired": counts.get("expired", 0),
+        "fail_pct": round(100.0 * failed / total, 1) if total else 0.0,
+        "reasons": sorted(reasons.items(), key=lambda kv: -kv[1])[:10],
+        "rbl": sorted(rbl.items(), key=lambda kv: -kv[1]),
+        "rejects": list(reversed(rejects))[:40],
+        "bounces": list(reversed(bounces))[:25],
+        "lines_scanned": len(lines),
+    }
+
+
+def shorten_reason(text):
+    t = re.sub(r"\s+", " ", text).strip()
+    t = re.sub(r"\b[0-9]{1,3}(\.[0-9]{1,3}){3}\b", "IP", t)
+    t = re.sub(r"<[^>]*>", "<addr>", t)
+    for pat, label in (
+        (r"Connection timed out", "Connection timed out"),
+        (r"Host or domain name not found|Name service error", "Host not found"),
+        (r"User unknown|Unknown user|does not exist|Recipient address rejected", "Recipient unknown"),
+        (r"spam|blocked|blacklist|reputation", "Rejected as spam"),
+        (r"Insufficient system resources", "Remote out of resources"),
+        (r"certificate|TLS", "TLS problem"),
+    ):
+        if re.search(pat, t, re.I):
+            return label
+    return t[:70]
+
+
+def domain_mail_health(domains):
+    rows = []
+    for d in domains:
+        name = d["domain"] if isinstance(d, dict) else d
+        if name == "ALL":
+            continue
+        rows.append({
+            "domain": name,
+            "dkim_local": bool(_dkim_value(name)),
+            "dkim_dns": txt_has(f"mail._domainkey.{name}", "v=DKIM1"),
+            "spf": txt_has(name, "v=spf1"),
+            "dmarc": txt_has(f"_dmarc.{name}", "v=DMARC1"),
+        })
+    return rows
+
+
+def txt_has(name, needle):
+    out = run_cmd(["dig", "+short", "+time=2", "+tries=1", name, "TXT"], timeout=6)
+    return needle.lower() in out.lower()
+
+
 def ui_auth(auth):
-    if auth != SECRET:
+    user = session_user(auth)
+    if not user:
         raise HTTPException(status_code=302, headers={"Location": "/login"})
+    return user
 
 
 def api_auth(authorization):
@@ -146,18 +350,53 @@ async def login_get(request: Request, error: int = 0):
 
 
 @app.post("/login")
-async def login_post(request: Request, password: str = Form(...)):
+async def login_post(request: Request, username: str = Form(...), password: str = Form(...)):
     ip = request.headers.get("x-real-ip", request.client.host)
     check_login_rate(ip)
-    if password != SECRET:
+    conn = db()
+    cur = conn.cursor(dictionary=True)
+    cur.execute(
+        "SELECT username, password_hash FROM ui_users WHERE username=%s AND active=1",
+        (username.strip(),),
+    )
+    row = cur.fetchone()
+    ok = False
+    if row:
+        try:
+            ok = pbkdf2_sha256.verify(password, row["password_hash"])
+        except Exception:
+            ok = False
+    token = ""
+    if ok:
+        token = secrets.token_urlsafe(32)
+        w = conn.cursor()
+        w.execute("DELETE FROM ui_sessions WHERE expires <= NOW()")
+        w.execute(
+            "INSERT INTO ui_sessions (token, username, created, expires) "
+            "VALUES (%s, %s, NOW(), DATE_ADD(NOW(), INTERVAL 30 DAY))",
+            (token, row["username"]),
+        )
+        w.execute("UPDATE ui_users SET last_login=NOW() WHERE username=%s", (row["username"],))
+        conn.commit()
+        w.close()
+    cur.close()
+    conn.close()
+    if not ok:
         return RedirectResponse("/login?error=1", status_code=303)
     r = RedirectResponse("/", status_code=303)
-    r.set_cookie("auth", SECRET, httponly=True, secure=True, samesite="lax", max_age=86400 * 30)
+    r.set_cookie("auth", token, httponly=True, secure=True, samesite="lax", max_age=86400 * 30)
     return r
 
 
 @app.get("/logout")
-async def logout():
+async def logout(auth: str | None = Cookie(default=None)):
+    if auth:
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM ui_sessions WHERE token=%s", (auth,))
+        conn.commit()
+        cur.close()
+        conn.close()
     r = RedirectResponse("/login", status_code=303)
     r.delete_cookie("auth")
     return r
@@ -173,7 +412,7 @@ async def index(
     new_key: str = "",
     reveal: str = "",
 ):
-    if auth != SECRET:
+    if not session_user(auth):
         return RedirectResponse("/login", status_code=303)
 
     if reveal:
@@ -214,6 +453,38 @@ async def index(
             "server_ip": SERVER_IP,
         },
     )
+
+
+@app.get("/health", response_class=HTMLResponse)
+async def health_page(request: Request, auth: str | None = Cookie(default=None), msg: str = ""):
+    user = session_user(auth)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    conn = db()
+    cur = conn.cursor(dictionary=True)
+    cur.execute("SELECT domain FROM domain WHERE domain != 'ALL' ORDER BY domain")
+    domains = cur.fetchall()
+    cur.close()
+    conn.close()
+    return templates.TemplateResponse(
+        request,
+        "health.html",
+        {
+            "user": user,
+            "msg": msg,
+            "queue": queue_summary(),
+            "log": log_health(),
+            "domains": domain_mail_health(domains),
+            "mail_log": MAIL_LOG,
+        },
+    )
+
+
+@app.post("/health/queue-flush")
+async def queue_flush(auth: str | None = Cookie(default=None)):
+    ui_auth(auth)
+    run_cmd(["postqueue", "-f"], timeout=30)
+    return RedirectResponse("/health?msg=Queue+flush+requested", status_code=303)
 
 
 @app.post("/domains/add")
@@ -383,7 +654,7 @@ async def delete_api_key(key_id: int = Form(...), auth: str | None = Cookie(defa
 
 @app.get("/login-as/{email:path}")
 async def login_as(email: str, request: Request, auth: str | None = Cookie(default=None)):
-    if auth != SECRET:
+    if not session_user(auth):
         return RedirectResponse("/login", status_code=303)
     ua = request.headers.get("user-agent", "Mozilla/5.0")
     headers = {"Host": MAIL_SERVER, "User-Agent": ua}

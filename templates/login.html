@@ -16,10 +16,13 @@
   <div class="card">
     <div class="card-body p-4">
       <div class="brand mb-4">⬡ Mail Manager</div>
-      {% if error %}<div class="alert alert-danger py-2 small">Wrong password.</div>{% endif %}
+      {% if error %}<div class="alert alert-danger py-2 small">Wrong username or password.</div>{% endif %}
       <form method="post" action="/login">
         <div class="mb-3">
-          <input type="password" name="password" class="form-control" placeholder="Password" autofocus required>
+          <input type="text" name="username" class="form-control" placeholder="Username" autocomplete="username" autofocus required>
+        </div>
+        <div class="mb-3">
+          <input type="password" name="password" class="form-control" placeholder="Password" autocomplete="current-password" required>
         </div>
         <button type="submit" class="btn btn-primary w-100">Sign in</button>
       </form>
