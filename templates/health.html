@@ -138,12 +138,12 @@
             <button class="btn btn-sm btn-outline-info">Retry queue now</button>
           </form>
         </div>
-        {% if queue.items %}
+        {% if queue.entries %}
         <div class="table-responsive">
           <table class="table table-sm table-hover mb-0">
             <thead><tr><th>ID</th><th>Age</th><th>From</th><th>To</th><th>Held because</th></tr></thead>
             <tbody>
-            {% for it in queue.items %}
+            {% for it in queue.entries %}
               <tr>
                 <td class="mono">{{ it.id }}</td>
                 <td class="muted">{{ it.when }}</td>

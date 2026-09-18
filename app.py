@@ -188,7 +188,7 @@ def read_mail_log(max_lines=40000):
 def queue_summary():
     out = run_cmd(["postqueue", "-p"])
     if not out.strip():
-        return {"available": False, "count": 0, "size_kb": 0, "items": []}
+        return {"available": False, "count": 0, "size_kb": 0, "entries": []}
     items = []
     total = 0
     size_kb = 0
@@ -210,7 +210,7 @@ def queue_summary():
     if block:
         items.append(parse_queue_block(block))
     items = [i for i in items if i.get("id")]
-    return {"available": True, "count": total or len(items), "size_kb": size_kb, "items": items[:60]}
+    return {"available": True, "count": total or len(items), "size_kb": size_kb, "entries": items[:60]}
 
 
 def parse_queue_block(block):
