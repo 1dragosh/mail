@@ -12,7 +12,7 @@ if [ ! -f "$KEY_DIR/mail.private" ]; then
     chown opendkim:opendkim "$KEY_DIR" "$KEY_DIR/mail.private" "$KEY_DIR/mail.txt"
     chmod 755 "$KEY_DIR"
     chmod 600 "$KEY_DIR/mail.private"
-    chmod 600 "$KEY_DIR/mail.txt"
+    chmod 644 "$KEY_DIR/mail.txt"
 fi
 
 KEYTABLE_ENTRY="mail._domainkey.$DOMAIN $DOMAIN:mail:$KEY_DIR/mail.private"
