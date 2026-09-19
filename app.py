@@ -470,7 +470,7 @@ def suppression_list(limit=200):
 
 
 ACCESS_FILE = os.environ.get("ACCESS_FILE", "/opt/mailmanager/sender_access.txt")
-ACCESS_ACTIONS = ("REJECT", "DISCARD")
+ACCESS_ACTIONS = ("REJECT", "DISCARD", "OK")
 _PATTERN_OK = re.compile(r"^[A-Za-z0-9._@+-]{3,255}$")
 
 
@@ -491,6 +491,8 @@ def write_access_map():
         if not r["active"]:
             continue
         note = re.sub(r"[\r\n]", " ", r["note"])[:120]
+        if r["action"] == "OK":
+            note = ""
         lines.append((r["pattern"] + "\t" + r["action"] + " " + note).rstrip())
     try:
         with open(ACCESS_FILE, "w") as fh:
