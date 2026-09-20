@@ -254,6 +254,57 @@
 
     <div class="col-12">
       <div class="card"><div class="card-body">
+        <h6 class="mb-1">Marketing stream &mdash; Inboxroad</h6>
+        <div class="muted small mb-3">
+          Alerts and anything else transactional go out from this server. Mail sent with
+          <code>stream=marketing</code> is handed to Inboxroad instead, on their IPs and their
+          reputation. Suppression and the unsubscribe link apply to both, so an address that
+          opts out or hard-bounces anywhere is dropped everywhere.
+        </div>
+
+        {% if not marketing.configured %}
+          <div class="muted small">Not configured &mdash; <code>INBOXROAD_KEY</code> is unset,
+          so the marketing stream returns 503 rather than falling back to this server.</div>
+        {% else %}
+        <div class="row g-3 mb-3">
+          <div class="col-4">
+            <div class="stat-label">Accepted, 7d</div>
+            <div class="h4 mb-0">{{ marketing.sent }}</div>
+          </div>
+          <div class="col-4">
+            <div class="stat-label">Refused, 7d</div>
+            <div class="h4 mb-0 {% if marketing.failed %}text-danger{% endif %}">{{ marketing.failed }}</div>
+          </div>
+          <div class="col-4">
+            <div class="stat-label">Bounces &amp; complaints, 7d</div>
+            <div class="h4 mb-0">{{ marketing.events }}</div>
+          </div>
+        </div>
+
+        {% if marketing.recent %}
+        <div class="table-responsive" style="max-height:300px;overflow:auto">
+          <table class="table table-sm table-hover mb-0">
+            <thead><tr><th>When</th><th>To</th><th>Subject</th><th>Status</th><th>Detail</th></tr></thead>
+            <tbody>
+            {% for m in marketing.recent %}
+              <tr>
+                <td class="muted">{{ m.sent_at }}</td>
+                <td class="mono">{{ m.recipient }}</td>
+                <td class="muted">{{ m.subject[:50] }}</td>
+                <td><span class="badge {% if m.status == 'sent' %}bg-success{% else %}bg-danger{% endif %}">{{ m.status }}</span></td>
+                <td class="muted">{{ m.detail[:60] }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}<div class="muted small">Nothing sent on the marketing stream yet.</div>{% endif %}
+        {% endif %}
+      </div></div>
+    </div>
+
+    <div class="col-12">
+      <div class="card"><div class="card-body">
         <h6 class="mb-1">Sender rules</h6>
         <div class="muted small mb-3">
           Checked at SMTP time, before the mail is accepted, so nothing is forwarded and no

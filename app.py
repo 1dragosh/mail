@@ -27,6 +27,9 @@ DB_PASS = os.environ["DB_PASS"]
 MASTER_PASS = os.environ["MASTER_PASS"]
 SECRET = os.environ["SECRET"]
 MAIL_BASE = os.environ.get("MAIL_BASE", "/var/mail/vhosts")
+INBOXROAD_URL = os.environ.get("INBOXROAD_URL", "https://webapi.inboxroad.com/api/v1")
+INBOXROAD_KEY = os.environ.get("INBOXROAD_KEY", "")
+STREAMS = ("transactional", "marketing")
 
 _login_attempts = defaultdict(list)
 _pending_keys = {}
@@ -100,6 +103,26 @@ async def lifespan(app):
         "reason VARCHAR(500) NOT NULL DEFAULT '',"
         "source VARCHAR(16) NOT NULL DEFAULT 'auto',"
         "created DATETIME NOT NULL"
+        ")"
+    )
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS marketing_log ("
+        "id INT AUTO_INCREMENT PRIMARY KEY,"
+        "message_id VARCHAR(255) NOT NULL DEFAULT '',"
+        "recipient VARCHAR(320) NOT NULL,"
+        "sender VARCHAR(320) NOT NULL DEFAULT '',"
+        "subject VARCHAR(500) NOT NULL DEFAULT '',"
+        "provider VARCHAR(32) NOT NULL DEFAULT 'inboxroad',"
+        "status VARCHAR(16) NOT NULL,"
+        "detail VARCHAR(500) NOT NULL DEFAULT '',"
+        "sent_at DATETIME NOT NULL,"
+        "INDEX (recipient), INDEX (sent_at)"
+        ")"
+    )
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS kv_state ("
+        "k VARCHAR(64) NOT NULL PRIMARY KEY,"
+        "v VARCHAR(255) NOT NULL DEFAULT ''"
         ")"
     )
     cur.execute(
@@ -439,6 +462,173 @@ def log_line_time(line):
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def kv_get(key):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT v FROM kv_state WHERE k=%s", (key,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else ""
+
+
+def kv_set(key, value):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO kv_state (k, v) VALUES (%s,%s) ON DUPLICATE KEY UPDATE v=VALUES(v)",
+        (key, str(value)[:255]),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def inboxroad_headers():
+    return {"Authorization": "Basic " + INBOXROAD_KEY, "Content-Type": "application/json"}
+
+
+def inboxroad_send(sender, recipient, subject, text_body, html_body, extra_headers):
+    if not INBOXROAD_KEY:
+        return "", "INBOXROAD_KEY is not set on this server"
+    payload = {
+        "from_email": sender,
+        "to_email": recipient,
+        "subject": subject or "",
+        "text": text_body or "",
+        "html": html_body or "",
+    }
+    if extra_headers:
+        payload["headers"] = extra_headers
+    try:
+        r = httpx.post(
+            INBOXROAD_URL.rstrip("/") + "/messages/",
+            json=payload,
+            headers=inboxroad_headers(),
+            timeout=30,
+        )
+    except Exception as e:
+        return "", str(e)
+    try:
+        data = r.json() if r.content else {}
+    except Exception:
+        data = {}
+    if r.status_code in (200, 201, 202):
+        return str(data.get("message_id") or data.get("id") or ""), ""
+    detail = data.get("detail") or data.get("message") or r.text
+    return "", "HTTP %s %s" % (r.status_code, str(detail)[:200])
+
+
+def inboxroad_fetch(path, cursor_key):
+    last = kv_get(cursor_key)
+    params = {"order": "asc"}
+    if last:
+        params["last_id"] = last
+    r = httpx.get(
+        INBOXROAD_URL.rstrip("/") + path,
+        params=params,
+        headers=inboxroad_headers(),
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json() if r.content else {}
+    rows = data.get("results", data) if isinstance(data, dict) else data
+    return rows if isinstance(rows, list) else []
+
+
+def inboxroad_row_email(row):
+    for k in ("recipient", "email", "to_email", "to", "address"):
+        v = row.get(k)
+        if v:
+            return str(v).strip().lower()
+    return ""
+
+
+def poll_inboxroad_events():
+    if not INBOXROAD_KEY:
+        return 0, 0
+    bounced = 0
+    complained = 0
+    conn = db()
+    cur = conn.cursor()
+    for path, cursor_key, status, dsn, hard in (
+        ("/bounces", "ir_bounce_last_id", "bounced", "", True),
+        ("/fbl", "ir_fbl_last_id", "complaint", "", True),
+    ):
+        try:
+            rows = inboxroad_fetch(path, cursor_key)
+        except Exception:
+            continue
+        for row in rows:
+            rcpt = inboxroad_row_email(row)
+            if not rcpt:
+                continue
+            rid = str(row.get("id") or row.get("bounce_id") or "")
+            reason = str(row.get("reason") or row.get("description") or row.get("status") or "")[:500]
+            code = str(row.get("code") or row.get("dsn") or dsn)[:16]
+            cur.execute(
+                "INSERT IGNORE INTO bounce_log "
+                "(qid, recipient, sender, status, dsn, reason, seen_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,NOW())",
+                ("ir-" + rid, rcpt, str(row.get("from_email") or "")[:320], status, code, reason),
+            )
+            if hard and is_hard_inboxroad(status, code, reason):
+                cur.execute(
+                    "INSERT INTO suppression (recipient, dsn, reason, source, created) "
+                    "VALUES (%s,%s,%s,'inboxroad',NOW()) "
+                    "ON DUPLICATE KEY UPDATE reason=VALUES(reason)",
+                    (rcpt, code, reason),
+                )
+            if status == "bounced":
+                bounced += 1
+            else:
+                complained += 1
+            if rid:
+                kv_set(cursor_key, rid)
+    conn.commit()
+    cur.close()
+    conn.close()
+    return bounced, complained
+
+
+def is_hard_inboxroad(status, code, reason):
+    if status == "complaint":
+        return True
+    if NO_SUCH_ADDRESS.match(code.strip()):
+        return True
+    return bool(re.search(r"\b5\.1\.[0-9]+\b", reason))
+
+
+def marketing_summary(limit=25):
+    conn = db()
+    cur = conn.cursor(dictionary=True)
+    cur.execute(
+        "SELECT status, COUNT(*) n FROM marketing_log "
+        "WHERE sent_at >= NOW() - INTERVAL 7 DAY GROUP BY status"
+    )
+    totals = {r["status"]: r["n"] for r in cur.fetchall()}
+    cur.execute(
+        "SELECT recipient, sender, subject, status, detail, sent_at "
+        "FROM marketing_log ORDER BY id DESC LIMIT %s",
+        (limit,),
+    )
+    recent = cur.fetchall()
+    cur.execute(
+        "SELECT COUNT(*) n FROM bounce_log WHERE qid LIKE 'ir-%' "
+        "AND seen_at >= NOW() - INTERVAL 7 DAY"
+    )
+    events = cur.fetchone()["n"]
+    cur.close()
+    conn.close()
+    return {
+        "sent": totals.get("sent", 0),
+        "failed": totals.get("failed", 0),
+        "events": events,
+        "recent": recent,
+        "configured": bool(INBOXROAD_KEY),
+    }
+
+
 def suppressed_recipients(addresses):
     wanted = [a.strip().lower() for a in addresses if a and a.strip()]
     if not wanted:
@@ -664,6 +854,10 @@ async def health_page(request: Request, auth: str | None = Cookie(default=None),
         ingest_mail_log()
     except Exception:
         pass
+    try:
+        poll_inboxroad_events()
+    except Exception:
+        pass
     supp_rows, supp_total = suppression_list()
     return templates.TemplateResponse(
         request,
@@ -678,6 +872,7 @@ async def health_page(request: Request, auth: str | None = Cookie(default=None),
             "suppressed": supp_rows,
             "suppressed_total": supp_total,
             "rules": sender_rules(),
+            "marketing": marketing_summary(),
         },
     )
 
@@ -1323,11 +1518,17 @@ class SendEmailIn(BaseModel):
     body_html: str = ""
     reply_to_id: str = ""
     unsubscribe_url: str = ""
+    stream: str = "transactional"
 
 
 @app.post("/api/send", status_code=200)
 async def api_send_email(body: SendEmailIn, authorization: str | None = Header(default=None)):
     api_auth(authorization)
+    stream = body.stream.strip().lower() or "transactional"
+    if stream not in STREAMS:
+        raise HTTPException(400, "stream must be one of: " + ", ".join(STREAMS))
+    if stream == "marketing" and not INBOXROAD_KEY:
+        raise HTTPException(503, "marketing stream unavailable: INBOXROAD_KEY is not set")
     conn = db()
     cur = conn.cursor()
     cur.execute("SELECT username FROM mailbox WHERE username=%s AND active=1", (body.from_email,))
@@ -1371,6 +1572,44 @@ async def api_send_email(body: SendEmailIn, authorization: str | None = Header(d
 
     raw = msg.as_bytes()
 
+    if stream == "marketing":
+        extra = {}
+        if msg.get("List-Unsubscribe"):
+            extra["List-Unsubscribe"] = msg["List-Unsubscribe"]
+            extra["List-Unsubscribe-Post"] = msg["List-Unsubscribe-Post"]
+        conn = db()
+        cur = conn.cursor()
+        accepted = []
+        failed = []
+        for rcpt in targets:
+            mid, err = inboxroad_send(
+                body.from_email, rcpt, body.subject, body.body, body.body_html, extra
+            )
+            cur.execute(
+                "INSERT INTO marketing_log "
+                "(message_id, recipient, sender, subject, provider, status, detail, sent_at) "
+                "VALUES (%s,%s,%s,%s,'inboxroad',%s,%s,NOW())",
+                (mid, rcpt, body.from_email, body.subject[:500],
+                 "sent" if not err else "failed", err[:500]),
+            )
+            if err:
+                failed.append(rcpt + ": " + err)
+            else:
+                accepted.append(rcpt)
+        conn.commit()
+        cur.close()
+        conn.close()
+        if not accepted:
+            raise HTTPException(502, "Inboxroad refused every recipient: " + "; ".join(failed))
+        return {
+            "sent": True,
+            "stream": "marketing",
+            "provider": "inboxroad",
+            "from": body.from_email,
+            "to": accepted,
+            "failed": failed,
+        }
+
     try:
         with smtplib.SMTP("127.0.0.1", 25, timeout=10) as smtp:
             smtp.sendmail(body.from_email, targets, raw)
@@ -1387,4 +1626,11 @@ async def api_send_email(body: SendEmailIn, authorization: str | None = Header(d
     except Exception:
         pass
 
-    return {"sent": True, "from": body.from_email, "to": body.to, "message_id": msg["Message-ID"]}
+    return {
+        "sent": True,
+        "stream": "transactional",
+        "provider": "postfix",
+        "from": body.from_email,
+        "to": targets,
+        "message_id": msg["Message-ID"],
+    }
