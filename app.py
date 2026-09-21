@@ -562,6 +562,12 @@ def poll_inboxroad_events():
         for row in rows:
             rcpt = inboxroad_row_email(row)
             if not rcpt:
+                cur.execute(
+                    "INSERT IGNORE INTO bounce_log "
+                    "(qid, recipient, sender, status, dsn, reason, seen_at) "
+                    "VALUES (%s,'?','','unparsed','',%s,NOW())",
+                    ("ir-raw-" + str(row.get("id") or len(rows)), str(row)[:500]),
+                )
                 continue
             rid = str(row.get("id") or row.get("bounce_id") or "")
             reason = str(row.get("reason") or row.get("description") or row.get("status") or "")[:500]
