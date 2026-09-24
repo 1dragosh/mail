@@ -519,15 +519,17 @@ def inboxroad_send(sender, recipient, subject, text_body, html_body, extra_heade
     return "", "HTTP %s %s" % (r.status_code, str(detail)[:200])
 
 
-def inboxroad_fetch(path, cursor_key):
+def inboxroad_fetch(path, cursor_key, extra=None):
     last = kv_get(cursor_key)
-    params = {"order": "asc"}
+    params = {"order": "asc", "page_size": "1000"}
+    if extra:
+        params.update(extra)
     if last:
         params["last_id"] = last
     r = httpx.get(
         INBOXROAD_URL.rstrip("/") + path,
         params=params,
-        headers=inboxroad_headers(),
+        headers={"X-API-Key": INBOXROAD_KEY, "Content-Type": "application/json"},
         timeout=30,
     )
     r.raise_for_status()
@@ -537,7 +539,7 @@ def inboxroad_fetch(path, cursor_key):
 
 
 def inboxroad_row_email(row):
-    for k in ("recipient", "email", "to_email", "to", "address"):
+    for k in ("rcpt", "recipient", "email", "to_email", "to", "address"):
         v = row.get(k)
         if v:
             return str(v).strip().lower()
@@ -551,13 +553,14 @@ def poll_inboxroad_events():
     complained = 0
     conn = db()
     cur = conn.cursor()
-    for path, cursor_key, status, dsn, hard in (
-        ("/bounces", "ir_bounce_last_id", "bounced", "", True),
-        ("/fbl", "ir_fbl_last_id", "complaint", "", True),
+    for path, cursor_key, status, extra in (
+        ("/bounces", "ir_bounce_last_id", "bounced", {"include_soft": "1"}),
+        ("/fbl", "ir_fbl_last_id", "complaint", None),
     ):
         try:
-            rows = inboxroad_fetch(path, cursor_key)
-        except Exception:
+            rows = inboxroad_fetch(path, cursor_key, extra)
+        except Exception as e:
+            print("inboxroad %s fetch failed: %s" % (path, e))
             continue
         for row in rows:
             rcpt = inboxroad_row_email(row)
@@ -566,19 +569,26 @@ def poll_inboxroad_events():
                     "INSERT IGNORE INTO bounce_log "
                     "(qid, recipient, sender, status, dsn, reason, seen_at) "
                     "VALUES (%s,'?','','unparsed','',%s,NOW())",
-                    ("ir-raw-" + str(row.get("id") or len(rows)), str(row)[:500]),
+                    ("ir-raw-" + str(row.get("uuid") or row.get("id") or len(rows)), str(row)[:500]),
                 )
                 continue
-            rid = str(row.get("id") or row.get("bounce_id") or "")
-            reason = str(row.get("reason") or row.get("description") or row.get("status") or "")[:500]
-            code = str(row.get("code") or row.get("dsn") or dsn)[:16]
+            rid = str(row.get("uuid") or row.get("id") or row.get("bounce_id") or "")
+            btype = str(row.get("bounce_type") or "").strip().lower()
+            reason = str(row.get("dsndiag") or row.get("bouncecat") or row.get("reason")
+                          or row.get("description") or row.get("status") or "")[:500]
+            m = re.search(r"\b[245]\.[0-9]{1,3}\.[0-9]{1,3}\b", reason)
+            code = str(row.get("code") or row.get("dsn") or (m.group(0) if m else ""))[:16]
+            row_status = status
+            if status == "bounced" and btype in ("s", "e"):
+                row_status = "soft" if btype == "s" else "expired"
+            sender = str(row.get("header_from") or row.get("orig") or row.get("from_email") or "")[:320]
             cur.execute(
                 "INSERT IGNORE INTO bounce_log "
                 "(qid, recipient, sender, status, dsn, reason, seen_at) "
                 "VALUES (%s,%s,%s,%s,%s,%s,NOW())",
-                ("ir-" + rid, rcpt, str(row.get("from_email") or "")[:320], status, code, reason),
+                ("ir-" + rid, rcpt, sender, row_status, code, reason),
             )
-            if hard and is_hard_inboxroad(status, code, reason):
+            if is_hard_inboxroad(status, code, reason, btype):
                 cur.execute(
                     "INSERT INTO suppression (recipient, dsn, reason, source, created) "
                     "VALUES (%s,%s,%s,'inboxroad',NOW()) "
@@ -597,9 +607,13 @@ def poll_inboxroad_events():
     return bounced, complained
 
 
-def is_hard_inboxroad(status, code, reason):
+def is_hard_inboxroad(status, code, reason, bounce_type=""):
     if status == "complaint":
         return True
+    if bounce_type == "h":
+        return True
+    if bounce_type in ("s", "e"):
+        return False
     if NO_SUCH_ADDRESS.match(code.strip()):
         return True
     return bool(re.search(r"\b5\.1\.[0-9]+\b", reason))
